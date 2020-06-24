@@ -24,25 +24,36 @@ Template:
 @author: Max
 """
 
-from datetime import datetime
-import backtrader as bt 
+import datetime
+import backtrader as bt
+import pandas as pd 
+import matplotlib.pyplot as plt
 
 #define class representing trading strategy
-class SmaStrategy(bt.Strategy):
-    params = (('ma_period', 20), )
+class BBand_Strategy(bt.Strategy):
+    params = (('period', 20),
+              ('devfactor', 2.0),)
+    
     def __init__(self):
         
         # keep track of close price in the series
         self.data_close = self.datas[0].close
-
+        self.data_open = self.datas[0].open
+        
         # keep track of pending orders/buy price/buy commission
         self.order = None
         self.price = None
         self.comm = None
 
-        # add a simple moving average indicator
-        self.sma = bt.ind.SMA(self.datas[0],
-                              period = self.params.ma_period)
+        # add Bolling bands
+        self.b_band = bt.ind.BollingerBands(self.datas[0],
+                                            period=self.p.period,
+                                            devfactor=self.p.devfactor)
+        
+        self.buy_signal = bt.ind.CrossOver(self.datas[0],
+                                           self.b_band.lines.bot)
+        self.sell_signal = bt.ind.CrossOver(self.datas[0],
+                                            self.b_band.lines.top)
         
     def log (self, txt):
         dt = self.datas[0].datetime.date(0).isoformat()
@@ -59,9 +70,6 @@ class SmaStrategy(bt.Strategy):
                 self.comm = order.executed.comm
             else:
                 self.log(f'SELL EXECUTED --- Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}, Commission: {order.executed.comm:.2f}')
-                
-                self.bar_executed = len(self)
-        
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
             self.log('Order Failed')
         
@@ -73,44 +81,53 @@ class SmaStrategy(bt.Strategy):
         
         self.log(f'OPERATION RESULT --- Gross: {trade.pnl:.2f}, Net: {trade.pnlcomm:.2f}')
     
-    def next(self):
-        if self.order:
-            return
-        
+    def next_open(self):
         if not self.position:
-            if self.data_close[0] > self.sma[0]:
-                self.log(f'BUY CREATED --- Price: {self.data_close[0]:.2f}')
-                self.order = self.buy(size=4)
+            if self.buy_signal > 0:
+                size = int(self.broker.getcash() / self.datas[0].open)
+                self.log(f'BUY CREATED --- Size: {size}, Cash: {self.broker.getcash():.2f}, Open: {self.data_open[0]}, Close: {self.data_close[0]}')
+                self.buy(size=size)
         else:
-            if self.data_close[0] < self.sma[0]:
-                self.log(f'SELL CREATED --- Price: {self.data_close[0]:.2f}')
-                self.order = self.sell(size=4)
-    def stop(self):
-        self.log(f'(ma_period = {self.params.ma_period:2d}) --- Terminal Value: {self.broker.getvalue():.2f}')
+            if self.sell_signal < 0:
+                self.log(f'SELL CREATED --- Size: {self.position.size}')
+                self.sell(size=self.position.size)
+   # def stop(self):
+        
             
     
 #data
-data = bt.feeds.YahooFinanceData(dataname='AAPL',
-                                 fromdate = datetime(2018,1,1),
-                                 todate = datetime(2018,12,31)
+data = bt.feeds.YahooFinanceData(dataname='WMT',
+                                 fromdate = datetime.datetime(2018,1,1),
+                                 todate = datetime.datetime(2018,12,31)
                                  )
 #set-up
-cerebro = bt.Cerebro(stdstats = False)
-
+cerebro = bt.Cerebro(stdstats = False, cheat_on_open=True)
+cerebro.addstrategy(BBand_Strategy)
 cerebro.adddata(data)
-cerebro.broker.setcash(1000.0)
-#Run strategy
-#cerebro.addstrategy(SmaStrategy)
+cerebro.broker.setcash(10000.0)
+cerebro.broker.setcommission(commission=0.001)
 #Optimize strategy
-cerebro.optstrategy(SmaStrategy, ma_period = range(10,31))
+#cerebro.optstrategy(SmaStrategy, ma_period = range(10,31))
 cerebro.addobserver(bt.observers.BuySell)
 cerebro.addobserver(bt.observers.Value)
-cerebro.run(maxcpus=4)
+cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
+cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='time_return')
+
 
 
 #Run
 print(f'Starting Portfolio Value: {cerebro.broker.getvalue():.2f}')
-cerebro.run()
+backtest_result = cerebro.run()
 print(f'Final Portfolio Value: {cerebro.broker.getvalue():.2f}')
 
+print(backtest_result[0].analyzers.returns.get_analysis())
+
 cerebro.plot(iplot=True, volume=False)
+
+returns_dict = backtest_result[0].analyzers.time_return.get_analysis()
+returns_df = pd.DataFrame(list(returns_dict.items()), columns = ['report_date', 'return']) \
+                .set_index('report_date')
+
+returns_df.plot(title='Portfolio returns')
+plt.tight_layout()
+plt.show()
