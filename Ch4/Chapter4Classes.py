@@ -8,6 +8,7 @@ Created on Wed Jun 24 20:31:28 2020
 
 
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
@@ -72,21 +73,33 @@ class CAPM:
         plt.show()        
         
 class Fama_French:
+    #Only needs assets and weights for portfolio, others for traditional
     def __init__(self):
-        self.risky_asset = 'FB'
-        self.start_date = '2013-12-31'
-        self.end_date = '2018-12-31'
+        print("Fama_French made")
+        pass
+    
+    def set_values(self, risky_asset, start_date, end_date, assets=None , weights=None ):
+        #individual asset
+        self.risky_asset = risky_asset
+        self.start_date = start_date
+        self.end_date = end_date
+        
+        #portfolio 
+        self.assets = assets
+        self.weights = weights
+        
     
     def load_factors_web(self):
         #for fun returns dictionary
         ff_dict = web.DataReader('F-F_Research_Data_Factors', 'famafrench', 
                                  start=self.start_date)
-        self.factor_df = ff_dict[0]
+        self.factor_df = ff_dict[0].div(100)
+        self.factor_df.index = self.factor_df.index.format()
         
     
     def load_factors_csv(self):
         #factors
-        self.factor_df = pd.read_csv('F-F_Research_Data_Factors.CSV', skiprows = 3)
+        factor_df = pd.read_csv('F-F_Research_Data_Factors.CSV', skiprows = 3)
         str_to_match = ' Annual Factors: January-December '
         indices = factor_df.iloc[:,0] == str_to_match
         start_of_annual = factor_df[indices].index[0]
@@ -96,12 +109,12 @@ class Fama_French:
     def rename_columns(self):
         #rename columns
         self.factor_df.columns = ['date', 'mkt', 'smb', 'hml', 'rf']
-        self.factor_df['date'] = pd.to_datetime(factor_df['date'],
+        self.factor_df['date'] = pd.to_datetime(self.factor_df['date'],
                                            format='%Y%m').dt.strftime("%Y-%m")
         
-        self.factor_df = factor_df.set_index('date')
-        self.factor_df = factor_df.loc[self.start_date:self.end_date]
-        self.factor_df = factor_df.apply(pd.to_numeric,
+        self.factor_df = self.factor_df.set_index('date')
+        self.factor_df = self.factor_df.loc[self.start_date:self.end_date]
+        self.factor_df = self.factor_df.apply(pd.to_numeric,
                                          errors='coerce').div(100)
     
     def load_asset(self):
@@ -116,9 +129,21 @@ class Fama_French:
         y.name = 'rtn'
         self.y = y
         
+    def load_portfolio(self):
+         self.portfolio_df = yf.download(self.assets,
+                               start = self.start_date,
+                               end = self.end_date,
+                               adjusted = True,
+                               progress = False)   
+         self.portfolio_df = self.portfolio_df['Adj Close']\
+             .resample('M').last()\
+                 .pct_change().dropna()
+         self.portfolio_df.index = self.portfolio_df.index.strftime('%Y-%m')
+         self.portfolio_df['portfolio_returns'] = np.matmul(
+             self.portfolio_df[self.assets].values, self.weights)
    
-    def estimate_model(self):
-        self.load_factors_web()
+    def estimate_indv_model(self):
+        self.load_factors_csv()
         self.rename_columns()
         self.load_asset()
         
@@ -130,14 +155,40 @@ class Fama_French:
         ff_model = smf.ols(formula='excess_rtn ~ mkt + smb + hml', data = ff_data).fit()
         
         print(ff_model.summary())
+
+        return ff_model
+    
+    def get_portfolio_data(self):
+        self.load_portfolio()
+        self.load_factors_web()
+        
+        self.ff_data = self.portfolio_df.join(self.factor_df).drop(self.assets,
+                                                                   axis = 1)
+        self.ff_data.columns = ['portf_rtn', 'mkt', 'smb', 'hml', 'rf']
+        self.ff_data['portf_ex_rtn'] = self.ff_data.portf_rtn - self.ff_data.rf
+        
+    def rolling_factor_model(self, model_formula, window_size):
+        coeffs = []
+        self.get_portfolio_data()
+        
+        for start_index in range(len(self.ff_data) - window_size + 1):
+            end_index = start_index + window_size
+            
+            ff_model = smf.ols(formula = model_formula, 
+                               data=self.ff_data[start_index:end_index]).fit()
+            coeffs.append(ff_model.params)
+        
+        self.coeffs_df = pd.DataFrame(coeffs, 
+                                      index=self.ff_data.index[window_size - 1:])
+        
+        self.coeffs_df.plot(title= 'Rolling Fame-French Three-Factor model')
+        plt.show()
+        return self.coeffs_df
         
         
         
         
-        
-        
-x = Fama_French()
-x.estimate_model()
+
         
         
     
