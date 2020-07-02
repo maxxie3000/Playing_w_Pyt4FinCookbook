@@ -85,7 +85,9 @@ class ARCH:
         
         for model in self.models:
             self.diag.append(model.forecast(horizon=1).variance.values[-1][0])
+        
         self.diag = np.sqrt(np.array(self.diag))
+        
         np.fill_diagonal(self.D,  self.diag)
         
         print(self.D)
