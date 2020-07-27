@@ -1,75 +1,88 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Fri Jul 24 12:41:13 2020
-
-Train a 1D CNN in PyTorch 
+Created on Sun Jul 26 20:15:59 2020
 
 @author: Max
 """
 
-#%% Import libraries 
+#%% import libraries 
 import matplotlib.pyplot as plt
 
-import yfinance as yf 
+import yfinance as yf
 import numpy as np
-import os
-import random
-
-import torch 
+import torch
 import torch.optim as optim
 import torch.nn as nn
-from torch.utils.data import (Dataset, TensorDataset,
+
+from torch.utils.data import (Dataset, TensorDataset, 
                               DataLoader, Subset)
-from collections import OrderedDict
 
 from chapter_10_utils import create_input_data, custom_set_seed
 
 from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import MinMaxScaler 
 
 device = 'cpu'
 
-#%% Define the parameters 
-#data
+#%% Define parameters
+# Data
 ticker = 'INTL'
-start_date = '2015-01-02'
+start_date = '2010-01-02'
 end_date = '2019-12-31'
 valid_start = '2019-07-01'
 n_lags = 12
 
-#neural network
-batch_size = 5
-n_epochs = 2000
+# Neural network 
+batch_size = 16
+n_epochs = 100
 
-#%% Download and prepare the data 
-df = yf.download(ticker, 
+#%% Download and prepare the data
+df = yf.download(ticker,
                  start=start_date,
                  end=end_date,
                  progress=False)
 
-df = df.resample('W-MON').last()
+df = df.resample("W-MON").last()
 valid_size = df.loc[valid_start:end_date].shape[0]
-prices = df['Adj Close'].values
+prices = df['Adj Close'].values.reshape(-1, 1)
 
-#%% Transform time series into input for the CNN 
-X, y = create_input_data(prices, n_lags)
+#%% Scale the time series of prices 
+valid_ind = len(prices) - valid_size 
 
-#%% Usa a naïve forecast as a benchmark and evaluate the performance
-naive_pred = prices[len(prices) - valid_size - 1: -1]
+minmax = MinMaxScaler(feature_range=(0, 1))
+
+prices_train = prices[:valid_ind]
+prices_valid = prices[valid_ind:]
+
+minmax.fit(prices_train)
+
+prices_train = minmax.transform(prices_train)
+prices_valid = minmax.transform(prices_valid)
+
+prices_scaled = np.concatenate((prices_train, prices_valid)).flatten()
+
+#%% Transform the time series into input for the RNN
+X, y = create_input_data(prices_scaled, n_lags)
+
+#%% Obtain Naive forecast
+naive_pred = prices[len(prices) - valid_size - 1:-1]
 y_valid = prices[len(prices) - valid_size:]
 
 naive_mse = mean_squared_error(y_valid, naive_pred)
 naive_rmse = np.sqrt(naive_mse)
-print(f"Naive forecast - MSE: {naive_mse:.2f}, RMSE: {naive_rmse:.2f}")
+print(f"Naive forecast - MSE: {naive_mse:.4f}, RMSE: {naive_rmse:.4f}")
 
-#%% Prepare the Dataloader objects 
-#Seed for reproducibility 
+#%% Prepare the DataLoader objects 
+#set seed for reproducibility 
 custom_set_seed(42)
 
-valid_ind = len(X) - valid_size 
+valid_ind = len(X) - valid_size
 
-X_tensor = torch.from_numpy(X).float()
-y_tensor = torch.from_numpy(y).float().unsqueeze(dim=1)
+X_tensor = torch.from_numpy(X).float().reshape(X.shape[0],
+                                               X.shape[1],
+                                               1)
+y_tensor = torch.from_numpy(y).float().reshape(X.shape[0], 1)
 
 dataset = TensorDataset(X_tensor, y_tensor)
 
@@ -77,36 +90,34 @@ train_dataset = Subset(dataset, list(range(valid_ind)))
 valid_dataset = Subset(dataset, list(range(valid_ind, len(X))))
 
 train_loader = DataLoader(dataset=train_dataset,
-                          batch_size=batch_size)
+                          batch_size=batch_size,
+                          shuffle=True)
 valid_loader = DataLoader(dataset=valid_dataset,
                           batch_size=batch_size)
 
-#%% Define the CNN's architecture 
-class Flatten(nn.Module):
-    def forward(self, x):
-        return x.view(x.size()[0], -1)
+#%% Define the model
+class RNN(nn.Module):
+    def __init__(self, input_size, hidden_size, n_layers, output_size):
+        super(RNN, self).__init__()
+        self.rnn = nn.RNN(input_size, hidden_size,
+                          n_layers, batch_first=True,
+                          nonlinearity='relu')
+        self.fc = nn.Linear(hidden_size, output_size)
     
-model = nn.Sequential(OrderedDict([
-    ('conv_1', nn.Conv1d(1, 32, 3, padding=1)),
-    ('max_pool_1', nn.MaxPool1d(2)),
-    ('relu_1', nn.ReLU()),
-    ('flatten', Flatten()),
-    ('fc_1', nn.Linear(192, 50)),
-    ('relu_2', nn.ReLU()),
-    ('dropout_1', nn.Dropout(0.4)),
-    ('fc_2', nn.Linear(50, 1))
-]))
-
-# print(model) --> control architecture
-
-#%% Instantiate the model, the loss function and the optimizer
-model = model.to(device)
+    def forward(self, x):
+        output, _ = self.rnn(x)
+        output = self.fc(output[:, -1,:])
+        return output 
+    
+#%% Instantiate the model, loss function and optimizer
+model = RNN(input_size=1, hidden_size=6, 
+            n_layers=1, output_size=1).to(device)
 loss_fn = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr = 0.001)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-#%% Train the network
-print_every = 50
-train_losses, valid_losses = [], []
+#%% Train the network 
+print_every = 10 
+train_losses, valid_losses = [], [] 
 
 for epoch in range(n_epochs):
     running_loss_train = 0
@@ -116,13 +127,11 @@ for epoch in range(n_epochs):
     for x_batch, y_batch in train_loader:
         optimizer.zero_grad()
         x_batch = x_batch.to(device)
-        x_batch = x_batch.view(x_batch.shape[0], 1 , n_lags)
-        
         y_batch = y_batch.to(device)
-        y_batch = y_batch.view(y_batch.shape[0], 1, 1)
-        y_hat = model(x_batch).view(y_batch.shape[0], 1, 1)
-        
+
+        y_hat = model(x_batch)
         loss = torch.sqrt(loss_fn(y_batch, y_hat))
+   
         loss.backward()
         optimizer.step()
         running_loss_train += loss.item() * x_batch.size(0)
@@ -133,18 +142,15 @@ for epoch in range(n_epochs):
         model.eval()
         for x_val, y_val in valid_loader:
             x_val = x_val.to(device)
-            x_val = x_val.view(x_val.shape[0], 1, n_lags)
-            
             y_val = y_val.to(device)
-            y_val = y_val.view(y_val.shape[0], 1, 1)
-            
-            y_hat = model(x_val).view(y_val.shape[0], 1, 1)
+
+            y_hat = model(x_val)
             loss = torch.sqrt(loss_fn(y_val, y_hat))
             running_loss_valid += loss.item() * x_val.size(0)
         epoch_loss_valid = running_loss_valid / len(valid_loader.dataset)
         if epoch > 0 and epoch_loss_valid < min(valid_losses):
             best_epoch = epoch
-            torch.save(model.state_dict(), './cnn_checkpoint.pth')
+            torch.save(model.state_dict(), './rnn_checkpoint.pth')
         valid_losses.append(epoch_loss_valid)
         
     if epoch % print_every == 0:
@@ -167,36 +173,38 @@ ax.legend()
 plt.show()
 
 #%% Load the best model (Validation loss)
-state_dict = torch.load('cnn_checkpoint.pth')
+state_dict = torch.load('rnn_checkpoint.pth')
 model.load_state_dict(state_dict)
 
 #%% Obtain predicitions
-y_pred, y_valid = [], []
+y_pred = []
 
 with torch.no_grad():
     model.eval()
     for x_val, y_val in valid_loader:
         x_val = x_val.to(device)
-        x_val = x_val.view(x_val.shape[0], 1, n_lags)
-        y_pred.append(model(x_val))
-        y_valid.append(y_val)
-y_pred = torch.cat(y_pred).numpy().flatten()
-y_valid = torch.cat(y_valid).numpy().flatten()
+        y_hat = model(x_val)
+        y_pred.append(y_hat)
+
+y_pred = torch.cat(y_pred).numpy()
+y_pred = minmax.inverse_transform(y_pred).flatten()
 
 #%% Evaluate predictions
 mlp_mse = mean_squared_error(y_valid, y_pred)
 mlp_rmse = np.sqrt(mlp_mse)
-print(f"CNN's forecast - MSE: {mlp_mse:.2f}, RMSE: {mlp_rmse:.2f}")
+print(f"RNN's forecast - MSE: {mlp_mse:.2f}, RMSE: {mlp_rmse:.2f}")
 
 fig, ax = plt.subplots()
 
-ax.plot(y_valid, color='blue', label='true')
-ax.plot(y_pred, color='red', label='prediction')
+ax.plot(y_valid, color='blue', label='True')
+ax.plot(y_pred, color='red', label='Prediction')
+ax.plot(naive_pred, color='green', label='Naive')
 
-ax.set(title="Multilayer Perceptron's Forecasts",
+ax.set(title="RNN's Forecasts",
        xlabel="Time",
        ylabel='Price ($)')
 ax.legend()
 
     
     
+        
